@@ -1,0 +1,30 @@
+# HR Attrition API — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Web framework
+fastapi==0.137.1
+uvicorn[standard]==0.49.0
+
+# Database
+sqlalchemy==2.0.51
+pymysql==1.2.0
+alembic==1.16.2
+
+# JWT tokens
+python-jose[cryptography]==3.5.0
+
+# Password hashing (used directly — passlib dropped due to bcrypt 5.x incompatibility)
+bcrypt==5.0.0
+
+# Data validation & settings
+pydantic[email]==2.13.4
+pydantic-settings==2.14.1
+
+# Environment variables
+python-dotenv==1.2.2
+
+# Google OAuth
+google-auth==2.55.0
+
+# HTTP client (Microsoft OAuth token exchange)
+requests==2.34.2
