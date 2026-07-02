@@ -28,3 +28,6 @@ google-auth==2.55.0
 
 # HTTP client (Microsoft OAuth token exchange)
 requests==2.34.2
+
+# Rate limiting
+slowapi==0.1.9

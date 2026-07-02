@@ -24,11 +24,15 @@
 #   Old MFA endpoints        : POST /auth/mfa/send-otp, POST /auth/mfa/verify-otp
 
 from datetime import datetime, timedelta, timezone
+import logging
 
 import requests as http_requests
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
+
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.config import settings
 from app.core.oauth import get_microsoft_user_info, verify_google_token
@@ -42,7 +46,6 @@ from app.schemas import (
     GoogleOAuthRequest,
     LoginRequest,
     MessageResponse,
-    RefreshTokenRequest,
     ResetPasswordRequest,
     TokenPairResponse,
     TokenResponse,
@@ -51,6 +54,8 @@ from app.schemas import (
 from app.security import (
     create_access_token,
     create_refresh_token,
+    create_session_token,
+    verify_session_token,
     decode_microsoft_token,
     decode_token,
     generate_otp,
@@ -62,6 +67,10 @@ from app.security import (
 )
 
 router = APIRouter(prefix="/auth")
+logger = logging.getLogger("hr_attrition.auth")
+
+# Global rate limiter instance. Tracks clients by their IP address.
+limiter = Limiter(key_func=get_remote_address)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -81,16 +90,19 @@ router = APIRouter(prefix="/auth")
     response_model=TokenPairResponse,
     tags=["Auth"],
 )
-def user_login(payload: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def user_login(request: Request, payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
 
     if not user or not user.hashed_password or not verify_password(payload.password, user.hashed_password):
+        logger.warning(f"Failed login attempt for user email: {payload.email} - Invalid credentials")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
         )
 
     if not user.is_active:
+        logger.warning(f"Attempted login on deactivated user account: {payload.email}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is deactivated — contact your administrator",
@@ -98,6 +110,7 @@ def user_login(payload: LoginRequest, db: Session = Depends(get_db)):
 
     # OAuth users cannot log in with email + password
     if user.auth_provider != "email":
+        logger.warning(f"Failed login attempt - OAuth user {payload.email} attempted password login")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"This account uses {user.auth_provider.title()} login. "
@@ -106,6 +119,7 @@ def user_login(payload: LoginRequest, db: Session = Depends(get_db)):
 
     # Admins must use the dedicated admin endpoint
     if user.role == UserRole.admin:
+        logger.warning(f"Failed login attempt for admin email on user endpoint: {payload.email}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin accounts must log in via POST /auth/admin/login",
@@ -120,6 +134,11 @@ def user_login(payload: LoginRequest, db: Session = Depends(get_db)):
     user.refresh_token = refresh_token
     db.commit()
 
+    # Set HTTP-Only cookies
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="lax")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax")
+
+    logger.info(f"Successful user login for user ID: {user.id} ({payload.email})")
     return TokenPairResponse(access_token=access_token, refresh_token=refresh_token)
 
 
@@ -134,7 +153,8 @@ def user_login(payload: LoginRequest, db: Session = Depends(get_db)):
     response_model=MessageResponse,
     tags=["Auth"],
 )
-def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def forgot_password(request: Request, response: Response, payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
 
     # Return a generic success message to prevent user enumeration
@@ -145,6 +165,16 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
     user.otp_code = otp
     user.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
     db.commit()
+
+    otp_token = create_session_token(user.email, timedelta(minutes=5), "otp")
+    response.set_cookie(
+        key="otp_session",
+        value=otp_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=300,
+    )
 
     send_forgot_password_otp_email(user.email, user.name, otp)
     return MessageResponse(message="If this email is registered, an OTP has been sent")
@@ -162,10 +192,20 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
     response_model=ForgotPasswordOTPVerifyResponse,
     tags=["Auth"],
 )
+@limiter.limit("5/minute")
 def forgot_password_verify_otp(
-    payload: ForgotPasswordOTPVerifyRequest, db: Session = Depends(get_db)
+    request: Request, response: Response, payload: ForgotPasswordOTPVerifyRequest, db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(User.email == payload.email).first()
+    otp_token = request.cookies.get("otp_session")
+    if not otp_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing OTP session")
+
+    try:
+        email = verify_session_token(otp_token, "otp")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+
+    user = db.query(User).filter(User.email == email).first()
 
     if not user or not user.is_active:
         raise HTTPException(
@@ -196,18 +236,25 @@ def forgot_password_verify_otp(
             detail="OTP has expired — request a new one via POST /auth/forgot-password",
         )
 
-    # OTP is valid — clear it and issue a short-lived password reset token
+    # OTP is valid — clear it and issue a short-lived password reset token cookie
     user.otp_code = None
     user.otp_expires_at = None
-
-    reset_token = generate_password_reset_token()
-    user.password_reset_token = reset_token
-    user.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
     db.commit()
 
+    response.delete_cookie("otp_session")
+
+    reset_token = create_session_token(user.email, timedelta(minutes=15), "reset")
+    response.set_cookie(
+        key="reset_session",
+        value=reset_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=900,
+    )
+
     return ForgotPasswordOTPVerifyResponse(
-        reset_token=reset_token,
-        message="OTP verified — use the reset_token to set your new password",
+        message="OTP verified — use the reset_session to set your new password",
     )
 
 
@@ -221,32 +268,23 @@ def forgot_password_verify_otp(
     response_model=MessageResponse,
     tags=["Auth"],
 )
-def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(
-        User.password_reset_token == payload.token
-    ).first()
+@limiter.limit("5/minute")
+def reset_password(request: Request, response: Response, payload: ResetPasswordRequest, db: Session = Depends(get_db)):
+    reset_token = request.cookies.get("reset_session")
+    if not reset_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing reset session")
 
-    if not user:
+    try:
+        email = verify_session_token(reset_token, "reset")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user or not user.is_active:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset token",
-        )
-
-    expiry = user.password_reset_expires_at
-    if expiry is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset token",
-        )
-
-    # Normalize timezone for comparison
-    if expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
-
-    if datetime.now(timezone.utc) > expiry:
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="Reset token has expired — start over via POST /auth/forgot-password",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session or user",
         )
 
     if payload.new_password != payload.confirm_password:
@@ -265,6 +303,8 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     user.password_reset_expires_at = None
     db.commit()
 
+    response.delete_cookie("reset_session")
+
     return MessageResponse(message="Password reset successfully — you can now log in")
 
 
@@ -275,13 +315,23 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
 # The refresh token must match the one stored in the DB (revoked on logout).
 @router.post(
     "/refresh-token",
-    response_model=TokenResponse,
+    response_model=TokenPairResponse,
     tags=["Auth"],
 )
-def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
-    token_data = decode_token(payload.refresh_token)
+def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
+    # Read the refresh_token from the HTTP-Only cookie
+    refresh_cookie = request.cookies.get("refresh_token")
+    if not refresh_cookie:
+        logger.warning("Refresh token attempt failed: no refresh token found in cookies")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token not found in cookies",
+        )
+
+    token_data = decode_token(refresh_cookie)
 
     if not token_data or token_data.get("type") != "refresh":
+        logger.warning("Refresh token attempt failed: invalid refresh token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
@@ -301,14 +351,24 @@ def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
             detail="User not found or inactive",
         )
 
-    if user.refresh_token != payload.refresh_token:
+    if user.refresh_token != refresh_cookie:
+        logger.warning(f"Refresh token attempt failed: token revoked for user ID {user_id}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token has been revoked — please log in again",
         )
 
     new_access_token = create_access_token({"sub": str(user.id), "role": user.role})
-    return TokenResponse(access_token=new_access_token)
+    new_refresh_token = create_refresh_token({"sub": str(user.id), "role": user.role})
+    user.refresh_token = new_refresh_token
+    db.commit()
+    
+    # Set the new access token and refresh token cookies
+    response.set_cookie(key="access_token", value=new_access_token, httponly=True, secure=True, samesite="lax")
+    response.set_cookie(key="refresh_token", value=new_refresh_token, httponly=True, secure=True, samesite="lax")
+
+    logger.info(f"Successful refresh token rotation for user ID: {user.id}")
+    return TokenPairResponse(access_token=new_access_token, refresh_token=new_refresh_token)
 
 
 # ── Session — Logout / Me ──────────────────────────────────────────────────────
@@ -321,11 +381,18 @@ def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
     tags=["Auth"],
 )
 def logout(
+    response: Response,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     current_user.refresh_token = None
     db.commit()
+
+    # Clear the session cookies
+    response.delete_cookie(key="access_token", httponly=True, secure=True, samesite="lax")
+    response.delete_cookie(key="refresh_token", httponly=True, secure=True, samesite="lax")
+
+    logger.info(f"Successful logout for user ID: {current_user.id}")
     return MessageResponse(message="Logged out successfully")
 
 
@@ -508,7 +575,7 @@ def google_login_page():
     ),
     tags=["OAuth"],
 )
-def google_auth(payload: GoogleOAuthRequest, db: Session = Depends(get_db)):
+def google_auth(payload: GoogleOAuthRequest, response: Response, db: Session = Depends(get_db)):
     if not settings.GOOGLE_CLIENT_ID:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -559,6 +626,10 @@ def google_auth(payload: GoogleOAuthRequest, db: Session = Depends(get_db)):
     refresh_token = create_refresh_token({"sub": str(user.id), "role": user.role})
     user.refresh_token = refresh_token
     db.commit()
+
+    # Set HTTP-Only cookies
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="lax")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax")
 
     return TokenPairResponse(access_token=access_token, refresh_token=refresh_token)
 
@@ -613,7 +684,7 @@ def microsoft_login():
     ),
     tags=["OAuth"],
 )
-def microsoft_callback(code: str, db: Session = Depends(get_db)):
+def microsoft_callback(code: str, response: Response, db: Session = Depends(get_db)):
     # Exchange the authorization code for Microsoft tokens
     token_response = http_requests.post(
         settings.MICROSOFT_TOKEN_URL,
@@ -696,6 +767,10 @@ def microsoft_callback(code: str, db: Session = Depends(get_db)):
     refresh_token = create_refresh_token({"sub": str(user.id), "role": user.role})
     user.refresh_token = refresh_token
     db.commit()
+
+    # Set HTTP-Only cookies
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="lax")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax")
 
     return TokenPairResponse(access_token=access_token, refresh_token=refresh_token)
 

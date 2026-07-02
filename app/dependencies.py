@@ -1,25 +1,26 @@
 # FastAPI dependency functions used to protect routes.
 # Inject these via Depends() in route handlers to enforce authentication and authorization.
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User, UserRole
 from app.security import decode_token
 
-# Extracts the Bearer token from the Authorization header automatically
-bearer_scheme = HTTPBearer()
-
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    request: Request,
     db: Session = Depends(get_db),
 ) -> User:
+    # Extracts the access_token from the HTTP-Only cookies.
     # Decodes the JWT and returns the corresponding active User from the DB.
     # Raises 401 if the token is invalid, expired, or the user doesn't exist.
-    payload = decode_token(credentials.credentials)
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    payload = decode_token(token)
     user_id: int = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")

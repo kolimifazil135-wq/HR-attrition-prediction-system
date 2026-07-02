@@ -7,21 +7,19 @@
 #                            [OAuth]   — Google & Microsoft OAuth
 #   users  → /users/*        [Admin]   — user CRUD (admin only)
 #
-# Swagger UI (/docs):
-#   The Authorize button is hidden. swagger_token.js (served from /static) captures
-#   the access_token from any login response and auto-injects it on all subsequent
-#   requests. Token is stored in sessionStorage (browser memory — cleared on tab close).
+# Authentication is handled via HTTP-Only cookies. Once logged in, the browser
+# automatically attaches the session tokens to all subsequent requests.
 
 import logging
 import time
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.openapi.utils import get_openapi
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from slowapi.extension import _rate_limit_exceeded_handler
 
+from app.routers.auth import limiter
 from app.database import Base, engine
 from app.routers import admin, auth, users
 
@@ -43,10 +41,15 @@ app = FastAPI(
     version="2.0.0",
     description=(
         "Backend API for the HR Attrition Prediction System.\n\n"
+        "**Authentication:** Call any login endpoint — the token is captured in an "
+        "HTTP-Only cookie and sent automatically on all subsequent requests."
     ),
-    docs_url=None,   # Custom /docs route injects swagger_token.js
     redoc_url=None,  # ReDoc not used
 )
+
+# ── Rate Limiting ─────────────────────────────────────────────────────────────
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # Allows the frontend (and Swagger UI on localhost) to call the API.
@@ -58,9 +61,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ── Static assets ─────────────────────────────────────────────────────────────
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
 # ── Global exception handler ──────────────────────────────────────────────────
@@ -90,36 +90,6 @@ async def log_requests(request: Request, call_next):
         duration_ms,
     )
     return response
-
-
-# ── OpenAPI schema — strip Authorize button ───────────────────────────────────
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-
-    schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        openapi_version=app.openapi_version,
-        description=app.description,
-        routes=app.routes,
-    )
-
-    # Remove global security schemes (hides the Authorize button)
-    if "components" in schema and "securitySchemes" in schema["components"]:
-        del schema["components"]["securitySchemes"]
-
-    # Remove per-endpoint security requirements (hides padlock icons)
-    for path in schema.get("paths", {}).values():
-        for method in path.values():
-            if "security" in method:
-                del method["security"]
-
-    app.openapi_schema = schema
-    return app.openapi_schema
-
-
-app.openapi = custom_openapi
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -169,7 +139,7 @@ def version():
             "database": "MySQL",
             "orm": "SQLAlchemy 2.x",
             "migrations": "Alembic",
-            "auth": "JWT (RS256 / HS256)",
+            "auth": "JWT via HTTP-Only Cookies",
         },
         "environment": "development",
     }
@@ -189,17 +159,3 @@ def health():
     """
     return {"status": "ok", "message": "Service is healthy"}
 
-
-# ── Swagger UI ────────────────────────────────────────────────────────────────
-@app.get("/docs", include_in_schema=False)
-async def swagger_ui():
-    html = get_swagger_ui_html(
-        openapi_url=app.openapi_url,
-        title=app.title + " - Swagger UI",
-        oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
-    )
-    html_content = html.body.decode("utf-8").replace(
-        "</body>",
-        '<script src="/static/swagger_token.js"></script></body>',
-    )
-    return HTMLResponse(html_content)

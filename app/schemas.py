@@ -73,9 +73,7 @@ class MFAVerifyOTPRequest(BaseModel):
 
 # ── Token Refresh ─────────────────────────────────────────
 
-class RefreshTokenRequest(BaseModel):
-    # Body for POST /auth/refresh-token
-    refresh_token: str
+# (Token is now read from HTTP-Only cookies, no request body needed)
 
 
 # ── Sign-Up Wizard (3 steps) ──────────────────────────────
@@ -115,7 +113,6 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     # Body for POST /auth/reset-password
-    token: str
     new_password: str
     confirm_password: str
 
@@ -140,14 +137,11 @@ class OTPLoginVerifyRequest(BaseModel):
 class ForgotPasswordOTPVerifyRequest(BaseModel):
     # Body for POST /auth/forgot-password/verify-otp
     # User submits the 6-digit OTP they received via the forgot-password email
-    email: EmailStr
     otp: str
 
 
 class ForgotPasswordOTPVerifyResponse(BaseModel):
     # Returned on successful OTP verification for forgot password.
-    # The frontend uses this reset_token to call POST /auth/reset-password.
-    reset_token: str
     message: str
 
 

@@ -65,6 +65,27 @@ def create_refresh_token(data: dict) -> str:
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_session_token(email: str, expires_delta: timedelta, token_type: str) -> str:
+    # Encodes an email into a short-lived session JWT (used for OTP and Reset cookies)
+    expire = datetime.now(timezone.utc) + expires_delta
+    payload = {"sub": email, "exp": expire, "type": token_type}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def verify_session_token(token: str, expected_type: str) -> str:
+    # Decodes a session JWT, validates its type, and returns the email (sub)
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if payload.get("type") != expected_type:
+            raise JWTError("Invalid token type")
+        email: str = payload.get("sub")
+        if email is None:
+            raise JWTError("Token missing subject")
+        return email
+    except JWTError as e:
+        raise ValueError(f"Token invalid or expired: {e}")
+
+
 def decode_token(token: str) -> dict:
     # Decodes and verifies a JWT; returns empty dict if token is invalid or expired
     try:
@@ -131,9 +152,19 @@ def _send_email(to: str, subject: str, html_body: str) -> None:
         server.sendmail(settings.SMTP_USER, to, msg.as_string())
 
 
+import logging
+
+logger = logging.getLogger("hr_attrition.security")
+
 def _fire_and_forget(fn, *args) -> None:
     # Runs email sending in a background thread so the HTTP response isn't blocked
-    Thread(target=fn, args=args, daemon=True).start()
+    def wrapper(*args):
+        try:
+            fn(*args)
+        except Exception as e:
+            logger.error(f"Background task {fn.__name__} failed: {e}", exc_info=True)
+
+    Thread(target=wrapper, args=args, daemon=True).start()
 
 
 def send_welcome_email(to_email: str, name: str, default_password: str) -> None:
