@@ -1,0 +1,118 @@
+<!-- === NOT_CONFIGURED === -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Auth — HR Portal</title>
+  <style>
+    * {box-sizing:border-box;margin:0;padding:0}
+    body {font-family:system-ui,sans-serif;background:#0f172a;display:flex;align-items:center;justify-content:center;min-height:100vh}
+    .card {background:#1e293b;border:1px solid #334155;border-radius:12px;padding:40px;max-width:480px;width:100%;color:#e2e8f0;text-align:center}
+    h2 {font-size:20px;color:#f1f5f9;margin-bottom:8px}
+    p {color:#94a3b8;font-size:13px;line-height:1.6}
+    code {background:#0f172a;padding:2px 6px;border-radius:4px;color:#a5b4fc;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>&#9888; Google OAuth Not Configured</h2>
+    <p>The <code>GOOGLE_CLIENT_ID</code> environment variable is not set.</p>
+    <p>Follow the steps in <strong>oauth_setup_guide.md</strong> to obtain your credentials, then add them to your <code>.env</code> file and restart the server.</p>
+  </div>
+</body>
+</html>
+<!-- === GOOGLE_LOGIN === -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sign in with Google — HR Portal</title>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>
+    * {box-sizing:border-box;margin:0;padding:0}
+    body {font-family:system-ui,sans-serif;background:#0f172a;display:flex;align-items:center;justify-content:center;min-height:100vh}
+    .card {background:#1e293b;border:1px solid #334155;border-radius:12px;padding:40px;max-width:480px;width:100%;color:#e2e8f0;text-align:center}
+    h2 {font-size:20px;color:#f1f5f9;margin-bottom:8px}
+    h3 {font-size:16px;color:#86efac;margin-bottom:12px}
+    .sub {color:#94a3b8;font-size:13px;margin-bottom:32px;line-height:1.6}
+    p {color:#94a3b8;font-size:13px;line-height:1.6}
+    #g_id_signin {display:flex;justify-content:center;margin-bottom:24px}
+    .divider {border:none;border-top:1px solid #334155;margin:24px 0}
+    #result {display:none;text-align:center}
+    #error {display:none;background:#450a0a;border:1px solid #7f1d1d;border-radius:6px;padding:12px;color:#fca5a5;font-size:13px;margin-top:16px}
+    .spinner {display:none;color:#94a3b8;font-size:13px;margin-top:16px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Sign in with Google</h2>
+    <p class="sub">
+      Click the button below to authenticate with your Google account.<br>
+      Your HR Portal account will be linked automatically by email.
+    </p>
+
+    <div id="g_id_signin"></div>
+    <p class="spinner" id="spinner">&#9696; Verifying with HR Portal…</p>
+
+    <div id="result">
+      <hr class="divider">
+      <h3>&#10003; Authentication Complete</h3>
+      <p>Your account is being signed in. You may now close this window and return to the portal.</p>
+    </div>
+    <div id="error"></div>
+    <script>
+      function handleCredentialResponse(response) {
+        document.getElementById('spinner').style.display = 'block';
+        document.getElementById('error').style.display   = 'none';
+
+        fetch('/auth/google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: response.credential })
+        })
+        .then(data => {
+          document.getElementById('spinner').style.display    = 'none';
+          document.getElementById('result').style.display     = 'block';
+        })
+        .catch(err => {
+          document.getElementById('spinner').style.display = 'none';
+          document.getElementById('error').style.display   = 'block';
+          document.getElementById('error').innerText = 'Error: ' + (err.detail || err.message || JSON.stringify(err));
+        });
+      }
+      window.onload = function() {
+        google.accounts.id.initialize({
+          client_id: '${google_client_id}',
+          callback: handleCredentialResponse,
+          auto_select: false,
+        });
+        google.accounts.id.renderButton(
+          document.getElementById('g_id_signin'),
+          { theme: 'filled_blue', size: 'large', text: 'signin_with', width: 300 }
+        );
+      };
+    </script>
+  </div>
+</body>
+</html>
+<!-- === MICROSOFT_SUCCESS === -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Microsoft Sign-In — HR Portal</title>
+  <style>
+    * {box-sizing:border-box;margin:0;padding:0}
+    body {font-family:system-ui,sans-serif;background:#0f172a;display:flex;align-items:center;justify-content:center;min-height:100vh}
+    .card {background:#1e293b;border:1px solid #334155;border-radius:12px;padding:40px;max-width:480px;width:100%;color:#e2e8f0;text-align:center}
+    h3 {font-size:16px;color:#86efac;margin-bottom:12px}
+    p {color:#94a3b8;font-size:13px;line-height:1.6}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h3>&#10003; Authentication Complete</h3>
+    <p>Your Microsoft account is being signed in. You may now close this window and return to the portal.</p>
+  </div>
+</body>
+</html>

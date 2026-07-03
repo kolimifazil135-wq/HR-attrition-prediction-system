@@ -73,6 +73,17 @@ logger = logging.getLogger("hr_attrition.auth")
 limiter = Limiter(key_func=get_remote_address)
 
 
+def render_block(filepath: str, block_name: str, **kwargs) -> str:
+    import string
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    marker = f"<!-- === {block_name} === -->"
+    if marker not in content:
+        return f"Error: Block {block_name} not found"
+    block_content = content.split(marker)[1].split("<!-- ===")[0].strip()
+    return string.Template(block_content).safe_substitute(**kwargs)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── [Auth] PASSWORD-BASED FLOWS ───────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -108,14 +119,6 @@ def user_login(request: Request, payload: LoginRequest, response: Response, db: 
             detail="Account is deactivated — contact your administrator",
         )
 
-    # OAuth users cannot log in with email + password
-    if user.auth_provider != "email":
-        logger.warning(f"Failed login attempt - OAuth user {payload.email} attempted password login")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"This account uses {user.auth_provider.title()} login. "
-                   f"Please sign in with {user.auth_provider.title()}.",
-        )
 
     # Admins must use the dedicated admin endpoint
     if user.role == UserRole.admin:
@@ -422,139 +425,10 @@ def me(current_user: User = Depends(get_current_user)):
 @router.get("/google/login", include_in_schema=False)
 def google_login_page():
     if not settings.GOOGLE_CLIENT_ID:
-        html = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Google Sign-In — HR Portal</title>
-  <style>
-    body{margin:0;font-family:system-ui,sans-serif;background:#0f172a;
-         display:flex;align-items:center;justify-content:center;min-height:100vh}
-    .card{background:#1e293b;border:1px solid #334155;border-radius:10px;
-          padding:36px;max-width:480px;width:100%;color:#e2e8f0;text-align:center}
-    h2{margin:0 0 12px;color:#f1f5f9}
-    p{color:#94a3b8;font-size:13px;line-height:1.6}
-    code{background:#0f172a;padding:2px 6px;border-radius:4px;color:#a5b4fc;font-size:12px}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>&#9888; Google OAuth Not Configured</h2>
-    <p>The <code>GOOGLE_CLIENT_ID</code> environment variable is not set.</p>
-    <p>Follow the steps in <strong>oauth_setup_guide.md</strong> to obtain your credentials,
-       then add them to your <code>.env</code> file and restart the server.</p>
-  </div>
-</body>
-</html>"""
+        html = render_block("app/templates/auth_screens.html", "NOT_CONFIGURED")
         return HTMLResponse(content=html, status_code=503)
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Sign in with Google — HR Portal</title>
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <style>
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:system-ui,sans-serif;background:#0f172a;
-         display:flex;align-items:center;justify-content:center;min-height:100vh}}
-    .card{{background:#1e293b;border:1px solid #334155;border-radius:12px;
-           padding:40px;max-width:480px;width:100%;color:#e2e8f0;text-align:center}}
-    h2{{font-size:20px;color:#f1f5f9;margin-bottom:8px}}
-    .sub{{color:#94a3b8;font-size:13px;margin-bottom:32px;line-height:1.6}}
-    #g_id_signin{{display:flex;justify-content:center;margin-bottom:24px}}
-    .divider{{border:none;border-top:1px solid #334155;margin:24px 0}}
-    #result{{display:none;text-align:left}}
-    #result h3{{font-size:14px;color:#a5b4fc;margin-bottom:12px}}
-    .token-box{{background:#0f172a;border:1px solid #334155;border-radius:6px;
-                padding:12px;font-family:monospace;font-size:12px;color:#86efac;
-                word-break:break-all;margin-bottom:10px}}
-    .label{{font-size:11px;color:#64748b;margin-bottom:4px;text-transform:uppercase;
-            letter-spacing:.05em}}
-    #error{{display:none;background:#450a0a;border:1px solid #7f1d1d;border-radius:6px;
-            padding:12px;color:#fca5a5;font-size:13px;margin-top:16px}}
-    .spinner{{display:none;color:#94a3b8;font-size:13px;margin-top:16px}}
-    .copy-btn{{background:transparent;border:1px solid #334155;color:#94a3b8;
-               padding:6px 12px;border-radius:4px;font-size:11px;cursor:pointer;
-               margin-top:6px;width:100%}}
-    .copy-btn:hover{{background:#334155;color:#f1f5f9}}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>Sign in with Google</h2>
-    <p class="sub">
-      Click the button below to authenticate with your Google account.<br>
-      Your HR Portal account will be linked automatically by email.
-    </p>
-
-    <div id="g_id_signin"></div>
-    <p class="spinner" id="spinner">&#9696; Verifying with HR Portal…</p>
-
-    <div id="result">
-      <hr class="divider">
-      <h3>&#10003; Login Successful — Your Tokens</h3>
-      <p class="label">Access Token</p>
-      <div class="token-box" id="access_token"></div>
-      <button class="copy-btn" onclick="copyToken('access_token')">Copy Access Token</button>
-      <br><br>
-      <p class="label">Refresh Token</p>
-      <div class="token-box" id="refresh_token"></div>
-      <button class="copy-btn" onclick="copyToken('refresh_token')">Copy Refresh Token</button>
-    </div>
-
-    <div id="error"></div>
-  </div>
-
-  <script>
-    function handleCredentialResponse(response) {{
-      document.getElementById('spinner').style.display = 'block';
-      document.getElementById('error').style.display   = 'none';
-
-      fetch('/auth/google', {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ token: response.credential }})
-      }})
-      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)))
-      .then(data => {{
-        document.getElementById('spinner').style.display    = 'none';
-        document.getElementById('result').style.display     = 'block';
-        document.getElementById('access_token').innerText  = data.access_token  || '';
-        document.getElementById('refresh_token').innerText = data.refresh_token || '';
-      }})
-      .catch(err => {{
-        document.getElementById('spinner').style.display = 'none';
-        document.getElementById('error').style.display   = 'block';
-        document.getElementById('error').innerText =
-          'Error: ' + (err.detail || err.message || JSON.stringify(err));
-      }});
-    }}
-
-    function copyToken(id) {{
-      const text = document.getElementById(id).innerText;
-      navigator.clipboard.writeText(text).then(() => {{
-        const btn = event.target;
-        const orig = btn.innerText;
-        btn.innerText = 'Copied!';
-        setTimeout(() => btn.innerText = orig, 2000);
-      }});
-    }}
-
-    window.onload = function() {{
-      google.accounts.id.initialize({{
-        client_id: '{settings.GOOGLE_CLIENT_ID}',
-        callback: handleCredentialResponse,
-        auto_select: false,
-      }});
-      google.accounts.id.renderButton(
-        document.getElementById('g_id_signin'),
-        {{ theme: 'filled_blue', size: 'large', text: 'signin_with', width: 300 }}
-      );
-    }};
-  </script>
-</body>
-</html>"""
+        
+    html = render_block("app/templates/auth_screens.html", "GOOGLE_LOGIN", google_client_id=settings.GOOGLE_CLIENT_ID)
     return HTMLResponse(content=html)
 
 
@@ -564,15 +438,7 @@ def google_login_page():
 # First-time Google sign-in creates the account automatically (no setup step needed).
 @router.post(
     "/google",
-    response_model=TokenPairResponse,
     summary="Sign in with Google",
-    description=(
-        "Accepts a **Google ID token** obtained via the Google Sign-In SDK "
-        "(or from the browser test page at `GET /auth/google/login`).\n\n"
-        "- First-time sign-in with a new email → **creates account automatically**\n"
-        "- Email matches an existing HR Portal account → **links Google to it**\n"
-        "- No OTP or setup step required for OAuth users."
-    ),
     tags=["OAuth"],
 )
 def google_auth(payload: GoogleOAuthRequest, response: Response, db: Session = Depends(get_db)):
@@ -631,7 +497,7 @@ def google_auth(payload: GoogleOAuthRequest, response: Response, db: Session = D
     response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="lax")
     response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax")
 
-    return TokenPairResponse(access_token=access_token, refresh_token=refresh_token)
+    return MessageResponse(message="Authentication successful")
 
 
 # ── Microsoft ─────────────────────────────────────────────────────────────────
@@ -642,12 +508,6 @@ def google_auth(payload: GoogleOAuthRequest, response: Response, db: Session = D
 @router.get(
     "/microsoft/login",
     summary="Sign in with Microsoft (Step 1 — redirect)",
-    description=(
-        "Redirect the browser to Microsoft's OAuth consent screen.\n\n"
-        "**Open this URL directly in a browser tab** (not callable via Swagger's 'Try it out' — "
-        "it returns a redirect, not JSON).\n\n"
-        "After the user authenticates, Microsoft redirects to `GET /auth/microsoft/callback`."
-    ),
     tags=["OAuth"],
 )
 def microsoft_login():
@@ -674,14 +534,7 @@ def microsoft_login():
 # and returns an app token pair.
 @router.get(
     "/microsoft/callback",
-    response_model=TokenPairResponse,
     summary="Microsoft OAuth Callback (Step 2 — auto-called by Microsoft)",
-    description=(
-        "This endpoint is called automatically by Microsoft after the user authenticates.\n\n"
-        "It exchanges the authorization code for Microsoft tokens, fetches the user profile, "
-        "and returns an HR Portal **access_token** + **refresh_token**.\n\n"
-        "You do not need to call this endpoint manually."
-    ),
     tags=["OAuth"],
 )
 def microsoft_callback(code: str, response: Response, db: Session = Depends(get_db)):
@@ -768,11 +621,14 @@ def microsoft_callback(code: str, response: Response, db: Session = Depends(get_
     user.refresh_token = refresh_token
     db.commit()
 
+    html = render_block("app/templates/auth_screens.html", "MICROSOFT_SUCCESS")
+    html_response = HTMLResponse(content=html)
+    
     # Set HTTP-Only cookies
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="lax")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax")
+    html_response.set_cookie(key="access_token", value=access_token, httponly=True, secure=True, samesite="lax")
+    html_response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax")
 
-    return TokenPairResponse(access_token=access_token, refresh_token=refresh_token)
+    return html_response
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

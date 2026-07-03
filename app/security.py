@@ -16,6 +16,16 @@ from jose import JWTError, jwt
 
 from app.config import settings
 
+def render_block(filepath: str, block_name: str, **kwargs) -> str:
+    import string
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    marker = f"<!-- === {block_name} === -->"
+    if marker not in content:
+        return f"Error: Block {block_name} not found"
+    block_content = content.split(marker)[1].split("<!-- ===")[0].strip()
+    return string.Template(block_content).safe_substitute(**kwargs)
+
 
 # ── Password hashing ──────────────────────────────────────
 # Uses the bcrypt library directly — passlib 1.7.4 is incompatible with bcrypt >= 4.2
@@ -172,41 +182,19 @@ def send_welcome_email(to_email: str, name: str, default_password: str) -> None:
     # Contains the user's email address and their system-generated default password.
     # The user must log in with these credentials and then complete the sign-up wizard.
     subject = "Welcome to HR Portal — Your Account Credentials"
-    html_body = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #2d3748;">
-
-        <h2 style="color: #2d3748;">Welcome, {name}!</h2>
-        <p style="color: #4a5568;">
-            Your HR Portal account has been created by your administrator.<br>
-            Use the credentials below to sign in for the first time.
-        </p>
-
-        <div style="background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;
-                    padding: 20px; margin: 24px 0;">
-            <p style="margin: 0 0 10px; font-size: 14px; color: #2d3748;">
-                <strong>Email:</strong>&nbsp; {to_email}
-            </p>
-            <p style="margin: 0; font-size: 14px; color: #2d3748;">
-                <strong>Default Password:</strong>&nbsp;
-                <code style="background: #eef2ff; padding: 3px 10px; border-radius: 4px;
-                             color: #4f46e5; font-size: 14px; letter-spacing: 0.05em;">
-                    {default_password}
-                </code>
-            </p>
-        </div>
-
-        <p style="color: #718096; font-size: 13px; line-height: 1.6;">
-            After signing in, you will be guided through a quick account setup to choose
-            your own password and complete your profile. This default password will no
-            longer work once you set a new one.
-        </p>
-
-        <p style="font-size: 12px; color: #a0aec0; border-top: 1px solid #e2e8f0; padding-top: 16px;">
-            If you did not expect this email, please contact your HR administrator.
-        </p>
-        <p style="color: #a0aec0; font-size: 12px; margin-top: 8px;">HR Attrition Portal</p>
-    </div>
-    """
+    
+    google_url = f"{settings.API_BASE_URL}/auth/google/login"
+    microsoft_url = f"{settings.API_BASE_URL}/auth/microsoft/login"
+    
+    html_body = render_block(
+        "app/templates/emails.html",
+        "WELCOME",
+        name=name,
+        email=to_email,
+        default_password=default_password,
+        google_url=google_url,
+        microsoft_url=microsoft_url,
+    )
     _fire_and_forget(_send_email, to_email, subject, html_body)
 
 
@@ -215,148 +203,17 @@ def send_password_reset_email(to_email: str, name: str, token: str) -> None:
     # The link points to the frontend reset-password page with the token as a query param.
     reset_url = f"{settings.FRONTEND_BASE_URL}/reset-password?token={token}"
     subject = "HR Portal — Password Reset Request"
-    html_body = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #2d3748;">
-
-        <h2 style="color: #2d3748;">Password Reset</h2>
-        <p style="color: #4a5568;">Hi {name},</p>
-        <p style="color: #4a5568;">
-            We received a request to reset your HR Portal password.<br>
-            Click the button below to set a new password.
-        </p>
-
-        <p style="text-align: center; margin: 32px 0;">
-            <a href="{reset_url}"
-               style="background: #4f46e5; color: #fff; padding: 12px 30px;
-                      border-radius: 6px; text-decoration: none; font-weight: bold;
-                      font-size: 14px; display: inline-block;">
-                Reset My Password
-            </a>
-        </p>
-
-        <p style="font-size: 12px; color: #a0aec0; text-align: center;">
-            This link expires in <strong>30 minutes</strong>.
-        </p>
-
-        <p style="font-size: 13px; color: #718096; line-height: 1.6;">
-            If you did not request a password reset, you can safely ignore this email.
-            Your password will not be changed.
-        </p>
-
-        <p style="font-size: 12px; color: #a0aec0; border-top: 1px solid #e2e8f0; padding-top: 16px;">
-            For security, never share this link with anyone.
-        </p>
-        <p style="color: #a0aec0; font-size: 12px; margin-top: 8px;">HR Attrition Portal</p>
-    </div>
-    """
+    html_body = render_block("app/templates/emails.html", "PASSWORD_RESET", name=name, reset_url=reset_url)
     _fire_and_forget(_send_email, to_email, subject, html_body)
 
 
-def send_account_setup_email(to_email: str, name: str, token: str) -> None:
-    # Welcome email sent to new users.
-    # Offers three ways to get started:
-    #   1. Classic setup-token link (set your own password, then log in with MFA)
-    #   2. Sign in directly with Microsoft (browser redirect, no MFA)
-    #   3. Sign in directly with Google (no MFA — uses the backend test page)
-    setup_url      = f"{settings.API_BASE_URL}/auth/setup-password?token={token}"
-    microsoft_url  = f"{settings.API_BASE_URL}/auth/microsoft/login"
-    google_url     = f"{settings.API_BASE_URL}/auth/google/login"
 
-    subject = "Welcome to HR Portal — Access Your Account"
-    html_body = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #2d3748;">
-
-        <h2 style="color: #2d3748;">Welcome, {name}!</h2>
-        <p style="color: #4a5568;">
-            Your HR Portal account has been created by your administrator.<br>
-            Choose how you'd like to get started:
-        </p>
-
-        <!-- ── Option 1: Classic setup link ── -->
-        <div style="background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;
-                    padding: 20px; margin: 24px 0;">
-            <p style="margin: 0 0 6px; font-weight: bold; color: #2d3748;">
-                Option 1 — Set Your Own Password
-            </p>
-            <p style="margin: 0 0 16px; font-size: 13px; color: #718096;">
-                Click the button below to choose your password, then log in with
-                your email + password + OTP verification.
-            </p>
-            <p style="text-align: center;">
-                <a href="{setup_url}"
-                   style="background: #4f46e5; color: #fff; padding: 11px 28px;
-                          border-radius: 6px; text-decoration: none; font-weight: bold;
-                          font-size: 14px; display: inline-block;">
-                    Set Up My Account
-                </a>
-            </p>
-            <p style="font-size: 12px; color: #a0aec0; text-align: center; margin: 12px 0 0;">
-                This link expires in <strong>15 minutes</strong>.
-            </p>
-        </div>
-
-        <!-- ── Divider ── -->
-        <p style="text-align: center; color: #a0aec0; font-size: 13px; margin: 0;">
-            ── or sign in directly with ──
-        </p>
-
-        <!-- ── Option 2: Microsoft ── -->
-        <div style="margin: 20px 0; text-align: center;">
-            <a href="{microsoft_url}"
-               style="display: inline-block; background: #0078d4; color: #fff;
-                      padding: 11px 28px; border-radius: 6px; text-decoration: none;
-                      font-weight: bold; font-size: 14px; margin-bottom: 12px;">
-                Sign in with Microsoft
-            </a>
-            <p style="font-size: 12px; color: #718096; margin: 4px 0 0;">
-                Uses your Microsoft / Outlook account — no OTP required.
-            </p>
-        </div>
-
-        <!-- ── Option 3: Google ── -->
-        <div style="margin: 8px 0 24px; text-align: center;">
-            <a href="{google_url}"
-               style="display: inline-block; background: #ea4335; color: #fff;
-                      padding: 11px 28px; border-radius: 6px; text-decoration: none;
-                      font-weight: bold; font-size: 14px; margin-bottom: 12px;">
-                Sign in with Google
-            </a>
-            <p style="font-size: 12px; color: #718096; margin: 4px 0 0;">
-                Uses your Google account — no OTP required.
-            </p>
-        </div>
-
-        <p style="font-size: 12px; color: #a0aec0; border-top: 1px solid #e2e8f0; padding-top: 16px;">
-            If you sign in with Google or Microsoft using <strong>{to_email}</strong>,
-            your HR Portal account will be linked automatically.
-        </p>
-        <p style="color: #a0aec0; font-size: 12px; margin-top: 8px;">HR Attrition Portal</p>
-    </div>
-    """
-    _fire_and_forget(_send_email, to_email, subject, html_body)
 
 
 def send_otp_email(to_email: str, name: str, otp: str) -> None:
     # OTP email sent during login for users going through MFA
     subject = "Your HR Portal Login OTP"
-    html_body = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto;">
-        <h2 style="color: #2d3748;">Two-Factor Authentication</h2>
-        <p>Hi {name}, use the code below to complete your login.</p>
-        <div style="text-align: center; margin: 32px 0;">
-            <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px;
-                         color: #4f46e5; background: #eef2ff; padding: 16px 32px;
-                         border-radius: 8px; display: inline-block;">
-                {otp}
-            </span>
-        </div>
-        <p style="color: #718096; font-size: 13px;">
-            This code expires in <strong>5 minutes</strong>. Never share it with anyone.
-        </p>
-        <hr style="border: none; border-top: 1px solid #e2e8f0; margin-top: 32px;">
-        <p style="color: #a0aec0; font-size: 12px;">HR Attrition Portal</p>
-    </div>
-    """
+    html_body = render_block("app/templates/emails.html", "OTP_LOGIN", name=name, otp=otp)
     _fire_and_forget(_send_email, to_email, subject, html_body)
 
 
@@ -365,37 +222,6 @@ def send_forgot_password_otp_email(to_email: str, name: str, otp: str) -> None:
     # understands this code is for resetting their password, not for signing in.
     # OTP is valid for 5 minutes (same as login OTP).
     subject = "HR Portal — Password Reset OTP"
-    html_body = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; color: #2d3748;">
-
-        <h2 style="color: #2d3748;">Password Reset Request</h2>
-        <p style="color: #4a5568;">Hi {name},</p>
-        <p style="color: #4a5568;">
-            We received a request to reset your HR Portal password.<br>
-            Use the verification code below to continue. Do <strong>not</strong> share this code
-            with anyone.
-        </p>
-
-        <div style="text-align: center; margin: 32px 0;">
-            <span style="font-size: 36px; font-weight: bold; letter-spacing: 8px;
-                         color: #4f46e5; background: #eef2ff; padding: 16px 32px;
-                         border-radius: 8px; display: inline-block;">
-                {otp}
-            </span>
-        </div>
-
-        <p style="font-size: 12px; color: #a0aec0; text-align: center;">
-            This code expires in <strong>5 minutes</strong>.
-        </p>
-
-        <p style="font-size: 13px; color: #718096; line-height: 1.6;">
-            If you did not request a password reset, you can safely ignore this email.
-            Your password will not be changed.
-        </p>
-
-        <hr style="border: none; border-top: 1px solid #e2e8f0; margin-top: 32px;">
-        <p style="color: #a0aec0; font-size: 12px;">HR Attrition Portal</p>
-    </div>
-    """
+    html_body = render_block("app/templates/emails.html", "FORGOT_PASSWORD_OTP", name=name, otp=otp)
     _fire_and_forget(_send_email, to_email, subject, html_body)
 
