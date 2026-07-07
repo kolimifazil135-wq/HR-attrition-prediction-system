@@ -161,9 +161,10 @@ class GoogleOAuthRequest(BaseModel):
 
 class UserCreate(BaseModel):
     # Body for POST /users — admin provides name, email, role; default password is generated and emailed
+    # Allowed roles: admin, hr, employee
     name: str
     email: EmailStr
-    role: UserRole = UserRole.hr_analyst
+    role: UserRole = UserRole.employee
 
 
 class UserUpdate(BaseModel):
@@ -175,6 +176,7 @@ class UserUpdate(BaseModel):
 
 class UserRoleUpdate(BaseModel):
     # Body for PUT /users/{id}/role
+    # Valid values: "admin", "hr", "employee"
     role: UserRole
 
 

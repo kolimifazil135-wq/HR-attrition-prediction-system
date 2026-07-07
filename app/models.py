@@ -12,14 +12,13 @@ from app.database import Base
 
 
 # Roles available in the system.
-# Five HR-domain-specific roles reflecting real organisational structure.
-# Only the admin role has full system access; all others are feature-scoped.
+# Three roles covering all organisational access levels in the HR platform.
+# Only the admin role has full system access; hr has department-level access;
+# employee is the default least-privilege role for all self-service and OAuth users.
 class UserRole(str, enum.Enum):
-    admin               = "admin"               # Full system access — platform administrator
-    hr_manager          = "hr_manager"          # HR department lead
-    hr_business_partner = "hr_business_partner" # Strategic HR liaison per business unit
-    hr_analyst          = "hr_analyst"          # Data / reporting access
-    department_manager  = "department_manager"  # Line manager (view own dept data only)
+    admin    = "admin"    # Full system access — platform administrator
+    hr       = "hr"       # HR department personnel (HR managers, analysts, business partners)
+    employee = "employee" # Standard employee / line user (default for new accounts)
 
 
 class User(Base):
@@ -30,7 +29,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[Optional[str]] = mapped_column(String(255), unique=True, index=True, nullable=True)
     hashed_password: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # nullable for OAuth users
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.hr_analyst, nullable=False)
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.employee, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # True once the user completes all three sign-up steps; always True for OAuth users
